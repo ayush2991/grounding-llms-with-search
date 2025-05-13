@@ -97,7 +97,9 @@ def get_sentence_transformer() -> SentenceTransformer:
 
 @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
 def get_gemini_response(
-    _client: genai.Client, query: str, max_retries: int = 3
+    query: str, 
+    api_key: str,
+    max_retries: int = 3
 ) -> str | None:
     """
     Get a response from the Gemini API for the given query.
@@ -106,21 +108,19 @@ def get_gemini_response(
     Response is cached for 7 days to avoid unnecessary API calls.
 
     Args:
-        _client: The Gemini API client instance
         query: The query to send to Gemini
+        api_key: The Gemini API key
         max_retries: Maximum number of retries on failure, defaults to 3
 
     Returns:
         The response text if successful, None if all retries fail
-
-    Raises:
-        No exceptions are raised, errors are logged and None is returned
     """
     logger.info(f"Getting Gemini response for: {query}")
 
     for attempt in range(max_retries):
         try:
-            response = _client.models.generate_content(
+            client = genai.Client(api_key=api_key)
+            response = client.models.generate_content(
                 model="gemini-2.0-flash", contents=[query]
             )
             return response.text
@@ -136,24 +136,21 @@ def get_gemini_response(
 
 
 @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
-def search_brave(query: str, num_results: int = 10) -> dict | None:
+def search_brave(
+    query: str, 
+    api_key: str,
+    num_results: int = 10
+) -> dict | None:
     """
     Search the Brave Search API with the given query.
 
-    Handles API authentication using either session state or secrets.
-    Results are cached for 7 days to avoid unnecessary API calls.
-
     Args:
         query: The search query string
+        api_key: The Brave Search API key
         num_results: Number of results to return (1-20)
 
     Returns:
         JSON response from Brave Search API if successful, None if error
-
-    Note:
-        The function will attempt to get the API key from:
-        1. Session state (user input in sidebar)
-        2. Streamlit secrets
     """
     if not isinstance(query, str) or not query.strip():
         logger.error("Invalid or empty query")
@@ -166,18 +163,6 @@ def search_brave(query: str, num_results: int = 10) -> dict | None:
         return None
 
     logger.info(f"Searching for: {query}")
-
-    # First try to get the API key from session state (user input)
-    api_key = st.session_state.get("brave_search_api_key")
-    # If not in session state, try to get from secrets
-    if not api_key:
-        try:
-            api_key = st.secrets["brave_search_api_key"]
-        except KeyError:
-            st.error(
-                "Please enter your Brave Search API key in the sidebar or set it in secrets."
-            )
-            return None
 
     headers = {
         "X-Subscription-Token": api_key,
@@ -364,7 +349,7 @@ def compute_all_similarities(
     return results
 
 
-@st.cache_data(ttl=7 * 24 * 60 * 60)
+@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
 def search_response_to_dataframe(search_response: dict | None) -> pd.DataFrame | None:
     """
     Convert Brave Search API response to a pandas DataFrame.
@@ -483,8 +468,10 @@ with st.sidebar:
         disabled=not st.session_state.query,
     )
     if clear_cache_button:
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.success("Cache cleared successfully.")
         st.session_state.clear()
-        st.experimental_rerun()
     with st.expander("API Keys", expanded=False):
         st.subheader("Brave Search")
         st.text_input(
@@ -499,12 +486,41 @@ with st.sidebar:
         )
 
 if run_button:
+    # Load API keys
+    brave_api_key = st.session_state.get("brave_search_api_key", "").strip()
+    gemini_api_key = st.session_state.get("gemini_api_key", "").strip()
+    
+    # Try to get API keys from secrets if not in session state
+    if not brave_api_key:
+        try:
+            brave_api_key = st.secrets.get("brave_search_api_key", "").strip()
+        except Exception as e:
+            logger.error(f"Error accessing secrets: {e}")
+            brave_api_key = ""
+            
+    if not gemini_api_key:
+        try:
+            gemini_api_key = st.secrets.get("gemini_api_key", "").strip()
+        except Exception as e:
+            logger.error(f"Error accessing secrets: {e}")
+            gemini_api_key = ""
+    
+    # Validate API keys
+    if not brave_api_key:
+        st.error("Please enter your Brave Search API key in the sidebar or set it in secrets.")
+        st.stop()
+    if not gemini_api_key:
+        st.error("Please enter your Gemini API key in the sidebar or set it in secrets.")
+        st.stop()
+    
     # Load the sentence transformer model
     sentence_model = get_sentence_transformer()
 
-    with st.spinner("Fetching search results..."):
+    with st.spinner("Fetching search results..."):    
         search_results = search_brave(
-            st.session_state.query, st.session_state.num_results
+            st.session_state.query,
+            brave_api_key,
+            st.session_state.num_results
         )
     if not search_results:
         st.error("Failed to get search results.")
@@ -515,7 +531,7 @@ if run_button:
         st.stop()
 
     with st.spinner("Fetching LLM response..."):
-        response = get_gemini_response(google_client, st.session_state.query)
+        response = get_gemini_response(st.session_state.query, gemini_api_key)
     if response:
         st.session_state.llm_response = response
         # Split LLM response into sentences
