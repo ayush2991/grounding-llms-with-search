@@ -407,7 +407,7 @@ def search_response_to_dataframe(search_response: dict | None) -> pd.DataFrame |
 
 
 st.set_page_config(
-    page_title="Grounding LLMs with Search", page_icon=":mag_right:", layout="wide"
+    page_title="Grounding LLMs with Web Search", page_icon=":mag_right:", layout="wide"
 )
 
 with st.spinner("Loading resources..."):
@@ -417,7 +417,7 @@ if google_client is None:
     st.stop()
 
 
-st.title("Grounding LLMs with Search")
+st.title("Grounding LLMs with Web Search")
 st.write(
     "This app demonstrates how to find web citations for LLM responses. Enter a query on the left and press 'Run' to see the results."
 )
