@@ -389,10 +389,20 @@ def compute_all_similarities(
     llm_sentences: List[str],
     search_response_df: pd.DataFrame,
     _model,
-    top_k: int = 3
+    top_k: int = 3,
+    initial_candidates: int = 10
 ) -> Dict[str, List[Dict]]:
     """
-    Compute and store top-k similar sentences for each LLM sentence
+    Two-stage similarity computation:
+    1. Fast word overlap scoring to get initial candidates
+    2. Compute embedding similarities only for top candidates
+
+    Args:
+        llm_sentences: List of sentences from LLM response
+        search_response_df: DataFrame with search results
+        _model: SentenceTransformer model
+        top_k: Number of final similar sentences to return
+        initial_candidates: Number of candidates to select in first stage
 
     Returns:
         Dictionary mapping each LLM sentence to its top-k similar sentences
@@ -401,22 +411,54 @@ def compute_all_similarities(
     results = {}
     try:
         for i, llm_sentence in enumerate(llm_sentences, 1):
-            sentence_results = []
             logger.debug(f"Processing LLM sentence {i}/{len(llm_sentences)}")
             
-            # Get similar sentences from each article
+            # Stage 1: Get initial candidates using word overlap
+            logger.info(f"Stage 1: Computing word overlap scores for LLM sentence {i}")
+            start_time = datetime.now()
+            candidates = []
+            total_sentences = 0
             for _, row in search_response_df.iterrows():
-                similar_sentences = get_top_similar_sentences(
-                    llm_sentence, row["Sentences"], row["URL"], _model, top_k
+                overlap_results = get_top_sentences_by_word_overlap(
+                    llm_sentence, row["Sentences"], row["URL"], initial_candidates
                 )
-                sentence_results.extend(similar_sentences)
-
-            # Sort all similar sentences by similarity and get top-k overall
-            sentence_results.sort(key=lambda x: x["similarity"], reverse=True)
-            results[llm_sentence] = sentence_results[:top_k]
+                candidates.extend(overlap_results)
+                total_sentences += len(row["Sentences"])
+            stage1_time = datetime.now() - start_time
+            logger.info(f"Stage 1 complete: Processed {total_sentences} sentences in {stage1_time.total_seconds():.2f}s")
             
-            max_similarity = max(s["similarity"] for s in sentence_results[:top_k]) if sentence_results else 0
+            # Sort and get top candidates overall
+            candidates.sort(key=lambda x: x['overlap_score'], reverse=True)
+            top_candidates = candidates[:initial_candidates]
+            
+            # Stage 2: Compute embedding similarities only for top candidates
+            logger.info(f"Stage 2: Computing embedding similarities for {len(top_candidates) if top_candidates else 0} candidates")
+            start_time = datetime.now()
+            if top_candidates:
+                # Extract sentences and compute embeddings
+                candidate_sentences = [c['sentence'] for c in top_candidates]
+                similarities = cosine_similarity(
+                    compute_embeddings([llm_sentence], _model),
+                    compute_embeddings(candidate_sentences, _model)
+                )[0]
+                
+                # Add similarity scores to candidates
+                for idx, candidate in enumerate(top_candidates):
+                    candidate['similarity'] = float(similarities[idx])
+                    logger.debug(f"Candidate {idx+1}/{len(top_candidates)}: similarity={candidate['similarity']:.3f}, overlap_score={candidate['overlap_score']:.3f}")
+                
+                # Sort by embedding similarity and get top-k
+                top_candidates.sort(key=lambda x: x['similarity'], reverse=True)
+                results[llm_sentence] = top_candidates[:top_k]
+                stage2_time = datetime.now() - start_time
+                logger.info(f"Stage 2 complete: Processed {len(top_candidates)} candidates in {stage2_time.total_seconds():.2f}s")
+            else:
+                results[llm_sentence] = []
+                logger.info("Stage 2 skipped: No candidates from stage 1")
+            
+            max_similarity = max(s["similarity"] for s in results[llm_sentence]) if results[llm_sentence] else 0
             logger.info(f"LLM sentence {i}: max similarity = {max_similarity:.3f}")
+            logger.info("----------------------------------------")
 
         return results
     except Exception as e:
@@ -508,6 +550,69 @@ def search_response_to_dataframe(search_response: dict | None) -> pd.DataFrame |
         logger.exception("Error converting search results to DataFrame")
         st.error(f"Error processing search results: {str(e)}")
         return None
+
+
+@st.cache_data(show_spinner=False)
+def compute_word_overlap_score(sentence1: str, sentence2: str) -> float:
+    """
+    Compute a simple word overlap score between two sentences.
+    
+    Args:
+        sentence1: First sentence
+        sentence2: Second sentence
+        
+    Returns:
+        Float score between 0 and 1
+    """
+    # Normalize and tokenize sentences
+    words1 = set(word.lower() for word in sentence1.split())
+    words2 = set(word.lower() for word in sentence2.split())
+    
+    # Remove common stop words
+    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+    words1 = words1 - stop_words
+    words2 = words2 - stop_words
+    
+    if not words1 or not words2:
+        return 0.0
+        
+    # Compute Jaccard similarity
+    intersection = len(words1.intersection(words2))
+    union = len(words1.union(words2))
+    return intersection / union if union > 0 else 0.0
+
+
+@st.cache_data(show_spinner=False)
+def get_top_sentences_by_word_overlap(
+    llm_sentence: str,
+    article_sentences: List[str],
+    article_url: str,
+    top_k: int = 10
+) -> List[Dict]:
+    """
+    Get top-k sentences based on word overlap score.
+    
+    Args:
+        llm_sentence: The sentence to compare against
+        article_sentences: List of sentences from the article
+        article_url: URL of the article
+        top_k: Number of top sentences to return
+        
+    Returns:
+        List of dicts with sentence, score, and URL
+    """
+    scores = []
+    for sentence in article_sentences:
+        score = compute_word_overlap_score(llm_sentence, sentence)
+        scores.append({
+            'sentence': sentence,
+            'overlap_score': score,
+            'url': article_url
+        })
+    
+    # Sort by score and get top-k
+    scores.sort(key=lambda x: x['overlap_score'], reverse=True)
+    return scores[:top_k]
 
 
 st.set_page_config(
