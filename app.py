@@ -210,28 +210,49 @@ def search_brave(
 def fetch_webpage_content(url: str, max_retries: int = 1) -> str | None:
     """
     Fetch the content of a webpage and extract readable text.
+    Implements conditional requests and content hashing for efficient caching.
 
     Args:
         url: The URL to fetch content from
-        max_retries: Maximum number of retries on failure, defaults to 3
+        max_retries: Maximum number of retries on failure, defaults to 1
 
     Returns:
         The readable text content of the webpage if successful, None if error
     """
     logger.info(f"Fetching content from URL: {url}")
+    
+    # Generate cache key from URL
+    url_hash = hashlib.md5(url.encode()).hexdigest()
+    cache_key = f"webpage_content_{url_hash}"
+    
+    # Try to get cached response headers
+    cached_etag = st.session_state.get(f"{cache_key}_etag")
+    cached_last_modified = st.session_state.get(f"{cache_key}_last_modified")
+    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
         "Connection": "keep-alive",
     }
+    
+    # Add conditional request headers if we have cached values
+    if cached_etag:
+        headers["If-None-Match"] = cached_etag
+    if cached_last_modified:
+        headers["If-Modified-Since"] = cached_last_modified
 
     for attempt in range(max_retries):
         try:
             logger.debug(f"Attempt {attempt + 1}/{max_retries} to fetch {url}")
             response = requests.get(url, headers=headers, timeout=10)
 
-            # Handle specific HTTP errors
+            # Handle 304 Not Modified
+            if response.status_code == 304:
+                logger.debug(f"Content not modified for {url}, using cached version")
+                return st.session_state.get(cache_key, "")
+
+            # Handle other HTTP errors
             if response.status_code == 403:
                 logger.warning(f"Access forbidden (403) for {url} - Website may be blocking automated access")
                 return ""
@@ -244,6 +265,12 @@ def fetch_webpage_content(url: str, max_retries: int = 1) -> str | None:
                     continue
                 return ""
 
+            # Store response headers for future conditional requests
+            if "ETag" in response.headers:
+                st.session_state[f"{cache_key}_etag"] = response.headers["ETag"]
+            if "Last-Modified" in response.headers:
+                st.session_state[f"{cache_key}_last_modified"] = response.headers["Last-Modified"]
+
             # Parse HTML with BeautifulSoup
             logger.debug(f"Successfully fetched {url}, parsing content")
             soup = BeautifulSoup(response.text, "html.parser")
@@ -254,7 +281,7 @@ def fetch_webpage_content(url: str, max_retries: int = 1) -> str | None:
 
             # Get text and clean it up
             text = soup.get_text(separator=" ", strip=True)
-
+            
             # Remove excessive whitespace
             lines = (line.strip() for line in text.splitlines())
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
@@ -268,6 +295,8 @@ def fetch_webpage_content(url: str, max_retries: int = 1) -> str | None:
             else:
                 logger.debug(f"Extracted {len(text)} characters of content from {url}")
 
+            # Cache the processed content
+            st.session_state[cache_key] = text
             return text
 
         except requests.exceptions.RequestException as e:
@@ -399,6 +428,7 @@ def compute_all_similarities(
 def search_response_to_dataframe(search_response: dict | None) -> pd.DataFrame | None:
     """
     Convert Brave Search API response to a pandas DataFrame.
+    Uses parallel processing to fetch webpage content efficiently.
 
     Args:
         search_response: JSON response from Brave Search API
@@ -431,9 +461,32 @@ def search_response_to_dataframe(search_response: dict | None) -> pd.DataFrame |
             columns={"title": "Title", "url": "URL"}
         )
 
-        # Fetch content for each URL
+        # Fetch content for each URL in parallel
         with st.spinner("Fetching article contents..."):
-            df["Content"] = df["URL"].apply(fetch_webpage_content)
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                # Start all fetch tasks
+                future_to_url = {
+                    executor.submit(fetch_webpage_content, url): url 
+                    for url in df["URL"]
+                }
+                
+                # Create a dict to store results
+                content_dict = {}
+                
+                # Process completed tasks as they finish
+                for future in as_completed(future_to_url):
+                    url = future_to_url[future]
+                    try:
+                        content = future.result()
+                        content_dict[url] = content
+                        logger.debug(f"Successfully fetched content from {url}")
+                    except Exception as e:
+                        logger.error(f"Failed to fetch content from {url}: {e}")
+                        content_dict[url] = ""
+
+                # Add content to dataframe
+                df["Content"] = df["URL"].map(content_dict)
 
         # Drop rows with empty content
         df = df.dropna(subset=["Content"]).copy()
