@@ -464,21 +464,39 @@ run_button = st.button(
 
 with st.sidebar:
     st.header("Parameters")
-    st.checkbox("Debug mode", True, key="debug_mode", help="Show raw search and LLM response.")
-    st.markdown("-----")
-    st.subheader("Brave Search")
-    st.text_input(
-        "Brave Search API Key",
-        type="password",
-        key="brave_search_api_key",
-        help="Brave Search API key.",
+    corroboration_score_threshold = st.slider(
+        "Corroboration Score Threshold",
+        0.0,
+        1.0,
+        0.7,
+        step=0.01,
+        key="corroboration_score_threshold",
+        help="Minimum similarity score to consider a sentence as corroborated.",
     )
     st.slider("Number of Search Results", 1, 20, 10, key="num_results")
-    st.markdown("-----")
-    st.subheader("Google Gemini")
-    st.text_input(
-        "Gemini API Key", type="password", key="gemini_api_key", help="Gemini API key."
+        
+    st.checkbox("Debug mode", True, key="debug_mode", help="Show raw search and LLM response.")
+    clear_cache_button = st.button(
+        "Clear Cache",
+        key="clear_cache",
+        help="Clear the cache to refresh data.",
+        disabled=not st.session_state.query,
     )
+    if clear_cache_button:
+        st.session_state.clear()
+        st.experimental_rerun()
+    with st.expander("API Keys", expanded=False):
+        st.subheader("Brave Search")
+        st.text_input(
+            "Brave Search API Key",
+            type="password",
+            key="brave_search_api_key",
+            help="Brave Search API key.",
+        )
+        st.subheader("Google Gemini")
+        st.text_input(
+            "Gemini API Key", type="password", key="gemini_api_key", help="Gemini API key."
+        )
 
 if run_button:
     # Load the sentence transformer model
@@ -526,6 +544,7 @@ if run_button:
         st.success("Successfully fetched LLM response.")
         with st.expander("LLM Response", expanded=False):
             st.markdown(st.session_state.llm_response)
+        st.markdown("-----")
 
     # Compute and store top similar sentences for each LLM sentence
     top_similarities = compute_all_similarities(
@@ -534,10 +553,20 @@ if run_button:
     st.session_state.top_similarities = top_similarities
     for i, sent in enumerate(llm_sentences):
         similar_sentences = top_similarities[sent]
+        corroboration_score = max(s['similarity'] for s in similar_sentences) if similar_sentences else 0
+        background_color = '#d4edda' if corroboration_score >= corroboration_score_threshold else '#f8d7da'
+        
+        
+        st.markdown(
+                f'<div style="padding: 10px; background-color: {background_color}; border-radius: 5px;">{sent}</div>',
+                unsafe_allow_html=True
+            )
         with st.expander(
-            f"(corroboration_score = {max(s['similarity'] for s in similar_sentences):.2f}) Sentence {i+1}: {sent}",
+            f"(corroboration_score = {corroboration_score:.2f})",
             expanded=False,
         ):
+           
+            
             if similar_sentences:
                 # Create DataFrame with explicit column ordering
                 df = pd.DataFrame(similar_sentences)
@@ -551,8 +580,15 @@ if run_button:
                     columns_to_show.append("url")
                 elif "URL" in df.columns:
                     columns_to_show.append("URL")
-
+                
                 if columns_to_show:
-                    st.dataframe(df[columns_to_show], use_container_width=True)
+                    # Apply background color based on similarity score
+                    def color_similarity(row):
+                        color = '#d4edda' if row['similarity'] >= 0.8 else '#f8d7da'
+                        return [f'background-color: {color}'] * len(columns_to_show)
+                    
+                    # Apply the styling to the entire row based on similarity score
+                    styled_df = df[columns_to_show].style.apply(color_similarity, axis=1)
+                    st.dataframe(styled_df, use_container_width=True)
                 else:
                     st.error("No valid columns found in similarity results")
