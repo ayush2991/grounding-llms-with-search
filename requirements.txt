@@ -1,0 +1,6 @@
+streamlit
+pandas>=2.2.3
+requests
+google-genai
+spacy
+watchdog
