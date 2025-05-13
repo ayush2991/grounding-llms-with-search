@@ -2,13 +2,43 @@ import streamlit as st
 import requests
 import pandas as pd
 import logging
-from google import genai
+import google.genai as genai
+from bs4 import BeautifulSoup
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+from typing import List, Dict, Tuple, Optional, Protocol
+import os
+import json
+from datetime import datetime, timedelta
+import hashlib
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+class SentenceTokenizer(Protocol):
+    """Protocol for sentence tokenizers"""
+    def tokenize(self, text: str) -> List[str]:
+        """Split text into sentences"""
+        ...
+
+class SimpleTokenizer:
+    """Simple space-based sentence tokenizer"""
+    def tokenize(self, text: str) -> List[str]:
+        """Split text into sentences using spaces"""
+        # Clean up any extra whitespace first
+        text = ' '.join(text.split())
+        sentences = text.split('. ')
+        # Add periods back and handle the last sentence
+        return [s + '.' if not s.endswith('.') else s for s in sentences]
+
 @st.cache_resource(show_spinner=False)
+def get_tokenizer() -> SentenceTokenizer:
+    """Get the sentence tokenizer instance"""
+    return SimpleTokenizer()
+
+@st.cache_resource()
 def get_google_client() -> genai.Client | None:
     """
     Initialize and return a Google Gemini API client.
@@ -50,8 +80,12 @@ def get_google_client() -> genai.Client | None:
         st.error("Failed to initialize Gemini API client. Please check your API key.")
         return None
 
-# Add parameter validation
-@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False, show_spinner_on_rerun=False)
+@st.cache_resource(show_spinner=True, ttl=7 * 24 * 60 * 60)
+def get_sentence_transformer() -> SentenceTransformer:
+    """Initialize and cache the sentence transformer model"""
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
+@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=True)
 def get_gemini_response(_client: genai.Client, query: str, max_retries: int = 3) -> str | None:
     """
     Get a response from the Gemini API for the given query.
@@ -87,7 +121,7 @@ def get_gemini_response(_client: genai.Client, query: str, max_retries: int = 3)
                 st.error("Max retries reached. Please try again later.")
                 return None
 
-@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False, show_spinner_on_rerun=False)
+@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=True)
 def search_brave(query: str, num_results: int = 10) -> dict | None:
     """
     Search the Brave Search API with the given query.
@@ -156,7 +190,100 @@ def search_brave(query: str, num_results: int = 10) -> dict | None:
         return None
     return response.json()
 
-@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
+# @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=True)
+def fetch_webpage_content(url: str, max_retries: int = 3) -> str | None:
+    """
+    Fetch the content of a webpage and extract readable text.
+    
+    Args:
+        url: The URL to fetch content from
+        max_retries: Maximum number of retries on failure, defaults to 3
+        
+    Returns:
+        The readable text content of the webpage if successful, None if error
+    """
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Connection': 'keep-alive',
+    }
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            
+            # Handle specific HTTP errors
+            if response.status_code == 403:
+                logger.warning(f"Access forbidden (403) for {url} - Website may be blocking automated access")
+                return ""
+            elif response.status_code == 404:
+                logger.warning(f"Page not found (404) for {url}")
+                return ""
+            elif response.status_code != 200:
+                logger.warning(f"HTTP {response.status_code} error for {url}")
+                if attempt < max_retries - 1:
+                    continue
+                return ""
+            
+            # Parse HTML with BeautifulSoup
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Remove script, style, and other non-content elements
+            for element in soup(['script', 'style', 'meta', 'link', 'noscript']):
+                element.decompose()
+                
+            # Get text and clean it up
+            text = soup.get_text(separator=' ', strip=True)
+            
+            # Remove excessive whitespace
+            lines = (line.strip() for line in text.splitlines())
+            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+            text = ' '.join(chunk for chunk in chunks if chunk)
+            
+            # Truncate very long texts to avoid overwhelming the UI
+            if len(text) > 10000:
+                text = text[:10000] + "... [content truncated]"
+                
+            return text
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed for {url} (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt == max_retries - 1:
+                return ""
+        except Exception as e:
+            logger.error(f"Failed to process content from {url}: {e}")
+            return ""
+
+@st.cache_data(show_spinner=True)
+def split_into_sentences(text: str) -> List[str]:
+    """Split text into sentences using the configured tokenizer"""
+    tokenizer = get_tokenizer()
+    return tokenizer.tokenize(text)
+
+@st.cache_data(show_spinner=True)
+def compute_embeddings(sentences: List[str], _model: SentenceTransformer) -> np.ndarray:
+    """Compute and cache sentence embeddings"""
+    return _model.encode(sentences, convert_to_tensor=True).cpu().numpy()
+
+@st.cache_data(show_spinner=True)
+def compute_sentence_similarities(
+    llm_sentences: List[str],
+    article_sentences: List[str],
+    _model: SentenceTransformer
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute cosine similarities between LLM response sentences and article sentences
+    
+    Returns:
+        Tuple of (similarities matrix, llm_embeddings, article_embeddings)
+    """
+    llm_embeddings = compute_embeddings(llm_sentences, _model)
+    article_embeddings = compute_embeddings(article_sentences, _model)
+    similarities = cosine_similarity(llm_embeddings, article_embeddings)
+    return similarities, llm_embeddings, article_embeddings
+
+# @st.cache_data(ttl=7 * 24 * 60 * 60)
 def search_response_to_dataframe(search_response: dict | None) -> pd.DataFrame | None:
     """
     Convert Brave Search API response to a pandas DataFrame.
@@ -165,7 +292,7 @@ def search_response_to_dataframe(search_response: dict | None) -> pd.DataFrame |
         search_response: JSON response from Brave Search API
         
     Returns:
-        DataFrame with Title and URL columns if successful, None if error
+        DataFrame with Title, URL, Content and sentence-level similarity data
     """
     try:
         if not isinstance(search_response, dict):
@@ -191,14 +318,27 @@ def search_response_to_dataframe(search_response: dict | None) -> pd.DataFrame |
             return None
             
         df = pd.DataFrame(results)
-        return df[["title", "url"]].rename(columns={
+        df = df[["title", "url"]].rename(columns={
             "title": "Title",
             "url": "URL"
         })
+        
+        # Fetch content for each URL
+        with st.spinner("Fetching article contents..."):
+            df["Content"] = df["URL"].apply(fetch_webpage_content)
+            
+        # Add sentence tokenization
+        df["Sentences"] = df["Content"].apply(split_into_sentences)
+        df["Num_Sentences"] = df["Sentences"].apply(len)
+            
+        return df
+        
     except Exception as e:
         logger.exception("Error converting search results to DataFrame")
         st.error(f"Error processing search results: {str(e)}")
         return None
+
+st.set_page_config(page_title="Grounding LLMs with Search", page_icon=":mag_right:", layout="wide")
 
 # Load resources
 google_client = get_google_client()
@@ -206,15 +346,7 @@ if google_client is None:
     st.error("Failed to create Google client. Please check your API key.")
     st.stop()
 
-try:
-    import spacy
-    spacy_model = spacy.load("en_core_web_sm")
-except Exception as e:
-    st.error(f"Failed to load Spacy model: {e}")
-    st.info("Please run: python -m spacy download en_core_web_sm")
-    st.stop()
 
-st.set_page_config(page_title="Grounding LLMs with Search", page_icon=":mag_right:", layout="wide")
 st.title("Grounding LLMs with Search")
 st.write("This app demonstrates how to find web citations for LLM responses.")
 
@@ -223,6 +355,10 @@ with st.sidebar:
     st.text_area("Query", "tell me about cobalt mining in 100 words", key="query")
     st.checkbox("Debug mode", False, key="debug_mode", help="Show raw search and LLM response.")
     run_button = st.button("Run", key="run", help="Run the app. Scores LLM response against search results.")
+    if st.button("Clear Cache", help="Clear all cached data"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
     st.markdown("-----")
     st.subheader("Brave Search")
     st.text_input("Brave Search API Key", type="password", key="brave_search_api_key", help="Brave Search API key.")
@@ -232,6 +368,9 @@ with st.sidebar:
     st.text_input("Gemini API Key", type="password", key="gemini_api_key", help="Gemini API key.")
 
 if run_button:
+    # Load the sentence transformer model
+    sentence_model = get_sentence_transformer()
+    
     with st.spinner("Fetching search results..."):    
         search_results = search_brave(st.session_state.query, st.session_state.num_results)
     if not search_results:
@@ -241,20 +380,61 @@ if run_button:
     if search_response_df is None or search_response_df.empty:
         st.error("Failed to parse search results into dataframe.")
         st.stop()
-    if st.session_state.debug_mode:
-        st.success("Successfully fetched {} search results.".format(len(search_response_df)))
-        with st.expander("Search Results", expanded=False):
-            st.dataframe(search_response_df, use_container_width=True)
 
     with st.spinner("Fetching LLM response..."):
         response = get_gemini_response(google_client, st.session_state.query)
     if response:
         st.session_state.llm_response = response
+        # Split LLM response into sentences
+        llm_sentences = split_into_sentences(response)
+        st.session_state.llm_sentences = llm_sentences
     else:
         st.error("Failed to get response from LLM.")
         st.stop()
+
+    # Compute similarities for each article
+    similarities_data = []
+    for idx, row in search_response_df.iterrows():
+        similarities, _, _ = compute_sentence_similarities(
+            llm_sentences,
+            row["Sentences"],
+            sentence_model
+        )
+        similarities_data.append({
+            "URL": row["URL"],
+            "Max_Similarity": float(np.max(similarities)),
+            "Avg_Similarity": float(np.mean(similarities)),
+            "Similarity_Matrix": similarities
+        })
+    
+    # Add similarity scores to DataFrame
+    similarities_df = pd.DataFrame(similarities_data)
+    search_response_df = search_response_df.merge(
+        similarities_df[["URL", "Max_Similarity", "Avg_Similarity"]],
+        on="URL"
+    )
+    search_response_df = search_response_df.sort_values(
+        by=["Max_Similarity", "Avg_Similarity"],
+        ascending=False
+    )
+
     if st.session_state.debug_mode:
+        st.success("Successfully fetched {} search results.".format(len(search_response_df)))
+        with st.expander("Search Results with Similarities", expanded=False):
+            st.dataframe(
+                search_response_df[[
+                    "Title", "URL", "Content",
+                    "Max_Similarity", "Avg_Similarity",
+                    "Num_Sentences"
+                ]],
+                use_container_width=True
+            )
+
         st.success("Successfully fetched LLM response.")
         with st.expander("LLM Response", expanded=False):
             st.markdown(st.session_state.llm_response)
+            st.write("Number of sentences:", len(llm_sentences))
+            st.write("Sentences:")
+            for i, sent in enumerate(llm_sentences):
+                st.write(f"{i+1}. {sent}")
 
