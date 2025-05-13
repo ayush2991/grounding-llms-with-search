@@ -31,11 +31,18 @@ class SimpleTokenizer:
 
     def tokenize(self, text: str) -> List[str]:
         """Split text into sentences using spaces"""
-        # Clean up any extra whitespace first
-        text = " ".join(text.split())
-        sentences = text.split(". ")
-        # Add periods back and handle the last sentence
-        return [s + "." if not s.endswith(".") else s for s in sentences]
+        logger.debug("Tokenizing text into sentences")
+        try:
+            # Clean up any extra whitespace first
+            text = " ".join(text.split())
+            sentences = text.split(". ")
+            # Add periods back and handle the last sentence
+            result = [s + "." if not s.endswith(".") else s for s in sentences]
+            logger.debug(f"Successfully tokenized text into {len(result)} sentences")
+            return result
+        except Exception as e:
+            logger.error(f"Error tokenizing text: {e}")
+            raise
 
 
 @st.cache_resource(show_spinner=False)
@@ -92,7 +99,14 @@ def get_google_client() -> genai.Client | None:
 @st.cache_resource(show_spinner=False, ttl=7 * 24 * 60 * 60)
 def get_sentence_transformer() -> SentenceTransformer:
     """Initialize and cache the sentence transformer model"""
-    return SentenceTransformer("all-MiniLM-L6-v2")
+    logger.info("Initializing sentence transformer model (all-MiniLM-L6-v2)")
+    try:
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.info("Successfully initialized sentence transformer model")
+        return model
+    except Exception as e:
+        logger.error(f"Failed to initialize sentence transformer model: {e}")
+        raise
 
 
 @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
@@ -204,6 +218,7 @@ def fetch_webpage_content(url: str, max_retries: int = 1) -> str | None:
     Returns:
         The readable text content of the webpage if successful, None if error
     """
+    logger.info(f"Fetching content from URL: {url}")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -213,13 +228,12 @@ def fetch_webpage_content(url: str, max_retries: int = 1) -> str | None:
 
     for attempt in range(max_retries):
         try:
+            logger.debug(f"Attempt {attempt + 1}/{max_retries} to fetch {url}")
             response = requests.get(url, headers=headers, timeout=10)
 
             # Handle specific HTTP errors
             if response.status_code == 403:
-                logger.warning(
-                    f"Access forbidden (403) for {url} - Website may be blocking automated access"
-                )
+                logger.warning(f"Access forbidden (403) for {url} - Website may be blocking automated access")
                 return ""
             elif response.status_code == 404:
                 logger.warning(f"Page not found (404) for {url}")
@@ -231,6 +245,7 @@ def fetch_webpage_content(url: str, max_retries: int = 1) -> str | None:
                 return ""
 
             # Parse HTML with BeautifulSoup
+            logger.debug(f"Successfully fetched {url}, parsing content")
             soup = BeautifulSoup(response.text, "html.parser")
 
             # Remove script, style, and other non-content elements
@@ -246,15 +261,17 @@ def fetch_webpage_content(url: str, max_retries: int = 1) -> str | None:
             text = " ".join(chunk for chunk in chunks if chunk)
 
             # Truncate very long texts to avoid overwhelming the UI
-            if len(text) > 10000:
+            original_length = len(text)
+            if original_length > 10000:
                 text = text[:10000] + "... [content truncated]"
+                logger.info(f"Truncated content from {original_length} to 10000 characters for {url}")
+            else:
+                logger.debug(f"Extracted {len(text)} characters of content from {url}")
 
             return text
 
         except requests.exceptions.RequestException as e:
-            logger.error(
-                f"Request failed for {url} (attempt {attempt + 1}/{max_retries}): {e}"
-            )
+            logger.error(f"Request failed for {url} (attempt {attempt + 1}/{max_retries}): {e}")
             if attempt == max_retries - 1:
                 return ""
         except Exception as e:
@@ -272,7 +289,14 @@ def split_into_sentences(text: str) -> List[str]:
 @st.cache_data(show_spinner=False)
 def compute_embeddings(sentences: List[str], _model: SentenceTransformer) -> np.ndarray:
     """Compute and cache sentence embeddings"""
-    return _model.encode(sentences, convert_to_tensor=True).cpu().numpy()
+    logger.debug(f"Computing embeddings for {len(sentences)} sentences")
+    try:
+        embeddings = _model.encode(sentences, convert_to_tensor=True).cpu().numpy()
+        logger.debug(f"Successfully computed embeddings with shape {embeddings.shape}")
+        return embeddings
+    except Exception as e:
+        logger.error(f"Error computing embeddings: {e}")
+        raise
 
 
 @st.cache_data(show_spinner=False)
@@ -285,10 +309,16 @@ def compute_sentence_similarities(
     Returns:
         Tuple of (similarities matrix, llm_embeddings, article_embeddings)
     """
-    llm_embeddings = compute_embeddings(llm_sentences, _model)
-    article_embeddings = compute_embeddings(article_sentences, _model)
-    similarities = cosine_similarity(llm_embeddings, article_embeddings)
-    return similarities, llm_embeddings, article_embeddings
+    logger.info(f"Computing similarities between {len(llm_sentences)} LLM sentences and {len(article_sentences)} article sentences")
+    try:
+        llm_embeddings = compute_embeddings(llm_sentences, _model)
+        article_embeddings = compute_embeddings(article_sentences, _model)
+        similarities = cosine_similarity(llm_embeddings, article_embeddings)
+        logger.info(f"Successfully computed similarities matrix with shape {similarities.shape}")
+        return similarities, llm_embeddings, article_embeddings
+    except Exception as e:
+        logger.error(f"Error computing sentence similarities: {e}")
+        raise
 
 
 @st.cache_data(show_spinner=False)
@@ -300,31 +330,37 @@ def get_top_similar_sentences(
     top_k: int = 3,
 ) -> List[Dict]:
     """Get top-k similar sentences for a single LLM sentence"""
-    llm_embedding = compute_embeddings([llm_sentence], _model)
-    article_embeddings = compute_embeddings(article_sentences, _model)
-    similarities = cosine_similarity(llm_embedding, article_embeddings)[
-        0
-    ]  # shape: (len(article_sentences),)
+    logger.debug(f"Finding top {top_k} similar sentences from article {article_url}")
+    try:
+        llm_embedding = compute_embeddings([llm_sentence], _model)
+        article_embeddings = compute_embeddings(article_sentences, _model)
+        similarities = cosine_similarity(llm_embedding, article_embeddings)[0]
 
-    # Get indices of top-k similar sentences
-    top_indices = np.argsort(similarities)[-top_k:][::-1]
+        # Get indices of top-k similar sentences
+        top_indices = np.argsort(similarities)[-top_k:][::-1]
 
-    # Create result list
-    results = []
-    for idx in top_indices:
-        results.append(
-            {
+        # Create result list
+        results = []
+        for idx in top_indices:
+            results.append({
                 "sentence": article_sentences[idx],
                 "similarity": float(similarities[idx]),
                 "url": article_url,
-            }
-        )
-    return results
+            })
+        
+        logger.debug(f"Found {len(results)} similar sentences with scores: {[r['similarity'] for r in results]}")
+        return results
+    except Exception as e:
+        logger.error(f"Error finding similar sentences: {e}")
+        raise
 
 
 @st.cache_data(show_spinner=False)
 def compute_all_similarities(
-    llm_sentences: List[str], search_response_df: pd.DataFrame, _model, top_k: int = 3
+    llm_sentences: List[str],
+    search_response_df: pd.DataFrame,
+    _model,
+    top_k: int = 3
 ) -> Dict[str, List[Dict]]:
     """
     Compute and store top-k similar sentences for each LLM sentence
@@ -332,21 +368,31 @@ def compute_all_similarities(
     Returns:
         Dictionary mapping each LLM sentence to its top-k similar sentences
     """
+    logger.info(f"Computing similarities for {len(llm_sentences)} LLM sentences across {len(search_response_df)} articles")
     results = {}
-    for llm_sentence in llm_sentences:
-        sentence_results = []
-        # Get similar sentences from each article
-        for _, row in search_response_df.iterrows():
-            similar_sentences = get_top_similar_sentences(
-                llm_sentence, row["Sentences"], row["URL"], _model, top_k
-            )
-            sentence_results.extend(similar_sentences)
+    try:
+        for i, llm_sentence in enumerate(llm_sentences, 1):
+            sentence_results = []
+            logger.debug(f"Processing LLM sentence {i}/{len(llm_sentences)}")
+            
+            # Get similar sentences from each article
+            for _, row in search_response_df.iterrows():
+                similar_sentences = get_top_similar_sentences(
+                    llm_sentence, row["Sentences"], row["URL"], _model, top_k
+                )
+                sentence_results.extend(similar_sentences)
 
-        # Sort all similar sentences by similarity and get top-k overall
-        sentence_results.sort(key=lambda x: x["similarity"], reverse=True)
-        results[llm_sentence] = sentence_results[:top_k]
+            # Sort all similar sentences by similarity and get top-k overall
+            sentence_results.sort(key=lambda x: x["similarity"], reverse=True)
+            results[llm_sentence] = sentence_results[:top_k]
+            
+            max_similarity = max(s["similarity"] for s in sentence_results[:top_k]) if sentence_results else 0
+            logger.info(f"LLM sentence {i}: max similarity = {max_similarity:.3f}")
 
-    return results
+        return results
+    except Exception as e:
+        logger.error(f"Error computing similarities across all sentences: {e}")
+        raise
 
 
 @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
@@ -360,6 +406,7 @@ def search_response_to_dataframe(search_response: dict | None) -> pd.DataFrame |
     Returns:
         DataFrame with Title, URL, Content and sentence-level similarity data
     """
+    logger.info("Converting search response to DataFrame")
     try:
         if not isinstance(search_response, dict):
             logger.error(f"Invalid response type: {type(search_response)}")
@@ -376,6 +423,8 @@ def search_response_to_dataframe(search_response: dict | None) -> pd.DataFrame |
             logger.warning("No results found in response")
             st.warning("No search results found")
             return None
+
+        logger.info(f"Processing {len(results)} search results")
 
         # Create DataFrame with required columns first
         df = pd.DataFrame(results)[["title", "url"]].rename(
@@ -397,7 +446,9 @@ def search_response_to_dataframe(search_response: dict | None) -> pd.DataFrame |
         # Add sentence tokenization
         df["Sentences"] = df["Content"].apply(split_into_sentences)
         df["Num_Sentences"] = df["Sentences"].apply(len)
-
+        
+        total_sentences = df["Num_Sentences"].sum()
+        logger.info(f"Successfully processed {len(df)} articles with {total_sentences} total sentences")
         return df
 
     except Exception as e:
@@ -545,7 +596,7 @@ if run_button:
         st.success(
             "Successfully fetched {} search results.".format(len(search_response_df))
         )
-        with st.expander("Search Results with Similarities", expanded=False):
+        with st.expander("Inspect Web Search Results", expanded=False):
             st.dataframe(
                 search_response_df[
                     [
@@ -558,14 +609,15 @@ if run_button:
             )
 
         st.success("Successfully fetched LLM response.")
-        with st.expander("LLM Response", expanded=False):
+        with st.expander("Inspect LLM Response", expanded=False):
             st.markdown(st.session_state.llm_response)
         st.markdown("-----")
 
-    # Compute and store top similar sentences for each LLM sentence
-    top_similarities = compute_all_similarities(
-        llm_sentences, search_response_df, sentence_model
-    )
+    with st.spinner("Computing scores..."):
+        # Compute and store top similar sentences for each LLM sentence
+        top_similarities = compute_all_similarities(
+            llm_sentences, search_response_df, sentence_model
+        )
     st.session_state.top_similarities = top_similarities
     for i, sent in enumerate(llm_sentences):
         similar_sentences = top_similarities[sent]
