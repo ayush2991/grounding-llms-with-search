@@ -89,13 +89,13 @@ def get_google_client() -> genai.Client | None:
         return None
 
 
-@st.cache_resource(show_spinner=True, ttl=7 * 24 * 60 * 60)
+@st.cache_resource(show_spinner=False, ttl=7 * 24 * 60 * 60)
 def get_sentence_transformer() -> SentenceTransformer:
     """Initialize and cache the sentence transformer model"""
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 
-@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=True)
+@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
 def get_gemini_response(
     _client: genai.Client, query: str, max_retries: int = 3
 ) -> str | None:
@@ -135,7 +135,7 @@ def get_gemini_response(
                 return None
 
 
-@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=True)
+@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
 def search_brave(query: str, num_results: int = 10) -> dict | None:
     """
     Search the Brave Search API with the given query.
@@ -207,7 +207,7 @@ def search_brave(query: str, num_results: int = 10) -> dict | None:
     return response.json()
 
 
-@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=True)
+@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
 def fetch_webpage_content(url: str, max_retries: int = 1) -> str | None:
     """
     Fetch the content of a webpage and extract readable text.
@@ -277,20 +277,20 @@ def fetch_webpage_content(url: str, max_retries: int = 1) -> str | None:
             return ""
 
 
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=False)
 def split_into_sentences(text: str) -> List[str]:
     """Split text into sentences using the configured tokenizer"""
     tokenizer = get_tokenizer()
     return tokenizer.tokenize(text)
 
 
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=False)
 def compute_embeddings(sentences: List[str], _model: SentenceTransformer) -> np.ndarray:
     """Compute and cache sentence embeddings"""
     return _model.encode(sentences, convert_to_tensor=True).cpu().numpy()
 
 
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=False)
 def compute_sentence_similarities(
     llm_sentences: List[str], article_sentences: List[str], _model: SentenceTransformer
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -306,7 +306,7 @@ def compute_sentence_similarities(
     return similarities, llm_embeddings, article_embeddings
 
 
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=False)
 def get_top_similar_sentences(
     llm_sentence: str,
     article_sentences: List[str],
@@ -337,7 +337,7 @@ def get_top_similar_sentences(
     return results
 
 
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=False)
 def compute_all_similarities(
     llm_sentences: List[str], search_response_df: pd.DataFrame, _model, top_k: int = 3
 ) -> Dict[str, List[Dict]]:
@@ -425,8 +425,8 @@ st.set_page_config(
     page_title="Grounding LLMs with Search", page_icon=":mag_right:", layout="wide"
 )
 
-# Load resources
-google_client = get_google_client()
+with st.spinner("Loading resources..."):
+    google_client = get_google_client()
 if google_client is None:
     st.error("Failed to create Google client. Please check your API key.")
     st.stop()
@@ -436,16 +436,19 @@ st.title("Grounding LLMs with Search")
 st.write(
     "This app demonstrates how to find web citations for LLM responses. Enter a query on the left and press 'Run' to see the results."
 )
-st.markdown("-----")
-
-with st.sidebar:
-    st.header("Parameters")
-    st.selectbox(
+st.selectbox(
         "Query",
         [
-            "how many calories are in a pizza?",
-            "tell me about cobalt mining in 100 words",
-            "what are the pros and cons of tariffs?",
+            "what is the economic impact of artificial intelligence on developing nations?",
+            "explain the concept of quantum entanglement in layman's terms.",
+            "compare and contrast the political systems of the United Kingdom and Canada.",
+            "what are the ethical considerations surrounding gene editing technology?",
+            "describe the role of the hippocampus in memory formation.",
+            "analyze the causes and consequences of the deforestation in the Amazon basin.",
+            "what are the key differences between a Roth IRA and a traditional IRA?",
+            "explain the principles behind blockchain technology and its potential applications beyond cryptocurrency.",
+            "discuss the impact of social media on political polarization.",
+            "what are the major challenges facing the implementation of renewable energy sources on a global scale?"
         ],
         key="query",
         accept_new_options=True,
@@ -453,17 +456,15 @@ with st.sidebar:
         index=None,
     )
 
-    st.checkbox(
-        "Debug mode", True, key="debug_mode", help="Show raw search and LLM response."
-    )
-    run_button = st.button(
-        "Run",
-        key="run",
-    )
-    if st.button("Clear Cache", help="Clear all cached data"):
-        st.cache_data.clear()
-        st.cache_resource.clear()
-        st.rerun()
+run_button = st.button(
+    "Run",
+    key="run",
+    help="Click to run the search and LLM response.",
+    disabled=not st.session_state.query,)
+
+with st.sidebar:
+    st.header("Parameters")
+    st.checkbox("Debug mode", True, key="debug_mode", help="Show raw search and LLM response.")
     st.markdown("-----")
     st.subheader("Brave Search")
     st.text_input(
@@ -533,7 +534,10 @@ if run_button:
     st.session_state.top_similarities = top_similarities
     for i, sent in enumerate(llm_sentences):
         similar_sentences = top_similarities[sent]
-        with st.expander(f"Sentence {i+1}: {sent}", expanded=False):
+        with st.expander(
+            f"(corroboration_score = {max(s['similarity'] for s in similar_sentences):.2f}) Sentence {i+1}: {sent}",
+            expanded=False,
+        ):
             if similar_sentences:
                 # Create DataFrame with explicit column ordering
                 df = pd.DataFrame(similar_sentences)
