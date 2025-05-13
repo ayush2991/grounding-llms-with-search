@@ -666,6 +666,17 @@ if run_button:
             st.markdown(st.session_state.llm_response)
         st.markdown("-----")
 
+    # Remove markdown formatting from LLM response
+    llm_sentences = [
+        sentence.replace("`", "").replace("*", "").replace("_", "")
+        for sentence in llm_sentences
+    ]
+
+    # Remove sentences that are too short
+    llm_sentences = [
+        sentence for sentence in llm_sentences if len(sentence.split()) > 5
+    ]
+
     with st.spinner("Computing scores..."):
         # Compute and store top similar sentences for each LLM sentence
         top_similarities = compute_all_similarities(
